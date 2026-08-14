@@ -147,6 +147,7 @@ DEFAULTS = {
             'copy'             : '<Shift><Control>c',
             'paste'            : '<Shift><Control>v',
             'paste_selection'  : '',
+            'send_newline'     : '<Shift>Return',
             'toggle_scrollbar' : '<Shift><Control>s',
             'search'           : '<Shift><Control>f',
             'page_up'          : '',
@@ -221,6 +222,7 @@ DEFAULTS = {
                 'background_image_mode' : 'stretch_and_fill',
                 'background_image_align_horiz': 'center',
                 'background_image_align_vert' : 'middle',
+                'background_blur'       : False,
                 'backspace_binding'     : 'ascii-del',
                 'delete_binding'        : 'escape-sequence',
                 'cursor_blink'          : True,
@@ -410,9 +412,13 @@ class Config(object):
     def get_system_mono_font(self):
         """Look up the system font"""
         if self.system_mono_font is not None:
-            return(self.system_mono_font)
+            return self.system_mono_font
+
+        if os.uname().sysname == 'Darwin':
+            self.system_mono_font = "Menlo 11"
+            return self.system_mono_font
         elif 'org.gnome.desktop.interface' not in Gio.Settings.list_schemas():
-            return
+            return None
         else:
             gsettings=Gio.Settings.new('org.gnome.desktop.interface')
             value = gsettings.get_value('monospace-font-name')
@@ -420,7 +426,7 @@ class Config(object):
                 self.system_mono_font = value.get_string()
             else:
                 self.system_mono_font = "Mono 10"
-            return(self.system_mono_font)
+            return self.system_mono_font
 
     def get_system_focus(self):
         """Look up the system focus setting"""

@@ -507,6 +507,16 @@ class Terminator(Borg):
             if maker.isinstance(child, 'Notebook'):
                 child.configure()
 
+        # Update blur hint on all windows
+        should_blur = False
+        for profile in profiles.values():
+            if (profile.get('background_blur', False) and
+                    profile.get('background_type', 'solid') in ('transparent', 'image')):
+                should_blur = True
+                break
+        for window in self.windows:
+            window.set_blur_behind(should_blur)
+
     def on_css_parsing_error(self, provider, section, error, user_data=None):
         """Report CSS parsing issues"""
         file_path = section.get_file().get_path()

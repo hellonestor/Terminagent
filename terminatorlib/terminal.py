@@ -5,6 +5,7 @@
 
 import os
 import signal
+import time
 import gi
 from gi.repository import GLib, GObject, Pango, Gtk, Gdk, GdkPixbuf, cairo
 gi.require_version('Vte', '2.91')  # vte-0.38 (gnome-3.14)
@@ -279,10 +280,54 @@ class Terminal(Gtk.VBox):
                 # not what we should be doing.
                 dbg('os.kill failed: %s' % ex)
                 pass
+            # Wait for the shell to finish exiting before we tear down the
+            # PTY. This is NOT a politeness hedge — removing it resurrects a
+            # real data-loss bug. The mechanism:
+            #
+            #   1. We've just sent SIGHUP to the shell.
+            #   2. If we destroy the VTE now, the PTY master closes and the
+            #      kernel delivers a SECOND SIGHUP via tty hangup to the
+            #      slave's foreground process group.
+            #   3. On bash 5.2 patch 14 and later (commit 6647917a, Dec 2022
+            #      — "process additional terminating signals when running
+            #      the EXIT trap after a terminating signal"), a second
+            #      SIGHUP arriving while termsig_handler is mid-flight
+            #      routes through the new kill_shell() path and terminates
+            #      bash immediately, before maybe_save_shell_history() can
+            #      finish writing $HISTFILE. Result: silent history
+            #      loss on every window close.
+            #
+            # Waiting until the shell has fully exited ensures the kernel's
+            # post-PTY-close SIGHUP has no recipient still trying to flush.
+            # The timeout caps the wait so a shell that ignores SIGHUP can't
+            # hang the window close; bash's own flush completes in well
+            # under 50 ms in practice.
+            self._wait_for_shell_exit()
 
         if self.vte:
             self.terminalbox.remove(self.vte)
             del(self.vte)
+
+    def _wait_for_shell_exit(self, timeout=0.5, poll_interval=0.02):
+        """Wait briefly for the spawned shell to exit before we tear
+        down the PTY. Required to avoid silent bash history loss
+        caused by bash 5.2 patch 14 reacting to the second SIGHUP that
+        the kernel delivers when we close the PTY master; see the
+        caller in Terminal.close() for the full mechanism.
+
+        WNOWAIT leaves the zombie in place so VTE's GLib child-watch
+        can still reap it and fire child-exited normally — we are only
+        observing the exit state here, not consuming it.
+        """
+        deadline = time.monotonic() + timeout
+        flags = os.WEXITED | os.WNOWAIT | os.WNOHANG
+        while time.monotonic() < deadline:
+            try:
+                if os.waitid(os.P_PID, self.pid, flags):
+                    return
+            except OSError:
+                return
+            time.sleep(poll_interval)
 
     def create_terminalbox(self):
         """Create a GtkHBox containing the terminal and a scrollbar"""
@@ -903,6 +948,60 @@ class Terminal(Gtk.VBox):
                 cursor_bg_color.parse(self.config['cursor_bg_color'])
             self.vte.set_color_cursor(cursor_bg_color)
 
+    def set_bgcolor(self, colorstr, alpha=None):
+        """Set a custom background color. If alpha is None, use the
+        profile's background_darkness when transparent/image, else opaque."""
+        if not colorstr:
+            return
+        self.bgcolor = Gdk.RGBA()
+        self.bgcolor.parse(colorstr)
+
+        if alpha is not None:
+            self.bgcolor.alpha = float(alpha)
+        elif self.config['background_type'] in ('transparent', 'image'):
+            self.bgcolor.alpha = float(self.config['background_darkness'])
+        else:
+            self.bgcolor.alpha = 1.0
+
+        bg_factor = self.config['inactive_bg_color_offset']
+        if bg_factor > 1.0:
+            bg_factor = 1.0
+        self.bgcolor_inactive = self.bgcolor.copy()
+        for bit in ['red', 'green', 'blue']:
+            setattr(self.bgcolor_inactive, bit,
+                    getattr(self.bgcolor_inactive, bit) * bg_factor)
+
+        if self.terminator.last_focused_term == self:
+            self.vte.set_colors(self.fgcolor_active, self.bgcolor,
+                                self.palette_active)
+        else:
+            self.vte.set_colors(self.fgcolor_inactive, self.bgcolor_inactive,
+                                self.palette_inactive)
+        self.vte.queue_draw()
+
+    def set_fgcolor(self, colorstr):
+        """Set a custom foreground (text) color"""
+        if not colorstr:
+            return
+        self.fgcolor_active = Gdk.RGBA()
+        self.fgcolor_active.parse(colorstr)
+
+        factor = self.config['inactive_color_offset']
+        if factor > 1.0:
+            factor = 1.0
+        self.fgcolor_inactive = self.fgcolor_active.copy()
+        for bit in ['red', 'green', 'blue']:
+            setattr(self.fgcolor_inactive, bit,
+                    getattr(self.fgcolor_inactive, bit) * factor)
+
+        if self.terminator.last_focused_term == self:
+            self.vte.set_colors(self.fgcolor_active, self.bgcolor,
+                                self.palette_active)
+        else:
+            self.vte.set_colors(self.fgcolor_inactive, self.bgcolor_inactive,
+                                self.palette_inactive)
+        self.vte.queue_draw()
+
     def get_window_title(self):
         """Return the window title"""
         return self.vte.get_window_title() or str(self.command)
@@ -1009,7 +1108,7 @@ class Terminal(Gtk.VBox):
             middle_click = [self.popup_menu, (widget, event)]
             right_click = [self.paste_clipboard, (not self.config['putty_paste_style_source_clipboard'], True)]
         else:
-            middle_click = [self.paste_clipboard, (True, True)]
+            middle_click = [self.paste_clipboard, (not self.config['putty_paste_style_source_clipboard'], True)]
             right_click = [self.popup_menu, (widget, event)]
 
         # Ctrl-click event here.
@@ -1282,7 +1381,7 @@ class Terminal(Gtk.VBox):
             # Never send a CRLF to the terminal from here
             txt = txt.rstrip('\r\n')
             for term in self.terminator.get_target_terms(self):
-                term.feed(txt.encode())
+                term.feed(txt)
             return
 
         widgetsrc = data.terminator.terminals[int(selection_data.get_data())]
@@ -1715,6 +1814,9 @@ class Terminal(Gtk.VBox):
 
     def feed(self, text):
         """Feed the supplied text to VTE"""
+        # Ensure text is bytes for feed_child
+        if isinstance(text, str):
+            text = text.encode()
         self.vte.feed_child(text)
 
     def zoom_in(self):
@@ -1896,6 +1998,9 @@ class Terminal(Gtk.VBox):
 
     def key_paste_selection(self):
         self.paste_clipboard(True)
+
+    def key_send_newline(self):
+        self.feed('\n')
 
     def key_toggle_scrollbar(self):
         self.do_scrollbar_toggle()

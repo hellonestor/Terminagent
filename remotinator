@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 #
 #    remotinator - send commands to Terminator via DBus
 #    Copyright (C) 2006-2010  cmsj@tenshu.net
@@ -51,6 +51,11 @@ COMMANDS={
     'bg_img_all':           [False, _('Set the background image for all terminals')],
     'switch_profile':       [True,  _('Switch current terminal profile')],
     'switch_profile_all':   [False, _('Switch profile of all currently running terminals')],
+    'feed_terminal':        [True,  _('Type text into a terminal (use with -s, see --help)')],
+    'get_terminal_text':    [True,  _('Get the text content of a terminal')],
+    'screenshot_terminal':  [True,  _('Save a 16:9 PNG screenshot of a terminal (use with -f, add -w for the whole window)')],
+    'scrollshot_terminal':  [True,  _('Save a long PNG screenshot covering the scrollback (use with -f, optionally -n)')],
+    'get_terminal_info':    [True,  _('Get terminal/window geometry and state as JSON')],
     }
 
 if __name__ == '__main__':
@@ -90,6 +95,30 @@ if __name__ == '__main__':
 
     parser.add_argument('-T', '--title', dest='title', type=str, default=argparse.SUPPRESS,
                 help=_('Tab name to set.'))
+
+    parser.add_argument('-s', '--text', dest='text', type=str, default=argparse.SUPPRESS,
+                help=_('Text to type into the terminal. Only used with "feed_terminal". '
+                       'Backslash escapes \\n \\r \\t \\e \\\\ and \\xHH are interpreted, '
+                       'e.g. -s \'ls -l\\r\' runs a command, -s \'\\x03\' sends Ctrl-C.'))
+
+    parser.add_argument('-n', '--lines', dest='lines', type=str, default=argparse.SUPPRESS,
+                help=_('Number of trailing buffer lines. Used with "get_terminal_text" '
+                       '(default: the visible screen) and "scrollshot_terminal" '
+                       '(default: 2000).'))
+
+    parser.add_argument('-S', '--scrollback', dest='scrollback', action='store_const', const='True',
+                default=argparse.SUPPRESS,
+                help=_('Fetch the entire scrollback buffer. Only used with "get_terminal_text".'))
+
+    parser.add_argument('-w', '--window', dest='window', action='store_const', const='True',
+                default=argparse.SUPPRESS,
+                help=_('Capture the whole window containing the terminal instead of just the '
+                       'terminal itself. Only used with "screenshot_terminal".'))
+
+    parser.add_argument('--no-ratio', dest='no_ratio', action='store_const', const='True',
+                default=argparse.SUPPRESS,
+                help=_('Do not letterbox the screenshot to a 16:9 aspect ratio. '
+                       'Only used with "screenshot_terminal".'))
 
     parser.add_argument('-v', '--version', action='version', version='%%(prog)s %s' %(APP_VERSION))
 

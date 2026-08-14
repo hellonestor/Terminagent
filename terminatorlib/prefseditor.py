@@ -7,7 +7,7 @@ write it to a config file
 
 """
 
-import os
+import os,sys
 from gi.repository import GObject, Gtk, Gdk
 
 from .util import dbg, err
@@ -127,6 +127,7 @@ class PrefsEditor:
                         'copy'             : _('Copy selected text'),
                         'paste'            : _('Paste clipboard'),
                         'paste_selection'  : _('Paste primary selection'),
+                        'send_newline'     : _('Send a newline to the terminal'),
                         'toggle_scrollbar' : _('Show/Hide the scrollbar'),
                         'search'           : _('Search terminal scrollback'),
                         'page_up'          : _('Scroll upwards one page'),
@@ -775,7 +776,11 @@ class PrefsEditor:
         # Background shading
         widget = guiget('background_darkness_scale')
         widget.set_value(float(self.config['background_darkness']))
-   
+
+        # Background blur
+        widget = guiget('background_blur_checkbutton')
+        widget.set_active(self.config['background_blur'])
+
         ## Scrolling tab
         # Scrollbar position
         widget = guiget('scrollbar_position_combobox')
@@ -1120,6 +1125,11 @@ class PrefsEditor:
         if value > 1.0:
           value = 1.0
         self.config['background_darkness'] = value
+        self.config.save()
+
+    def on_background_blur_checkbutton_toggled(self, widget):
+        """Background blur setting changed"""
+        self.config['background_blur'] = widget.get_active()
         self.config.save()
 
     def on_palette_combobox_changed(self, widget):
@@ -1758,8 +1768,10 @@ class PrefsEditor:
 
         if backtype in ('transparent', 'image'):
             guiget('darken_background_scale').set_sensitive(True)
+            guiget('background_blur_checkbutton').set_sensitive(True)
         else:
             guiget('darken_background_scale').set_sensitive(False)
+            guiget('background_blur_checkbutton').set_sensitive(False)
 
     def on_profile_selection_changed(self, selection):
         """A different profile was selected"""
@@ -2005,6 +2017,10 @@ class PrefsEditor:
 
         binding = liststore.get_value(liststore.get_iter(path), 0)
         accel = Gtk.accelerator_name(key, mods)
+        if sys.platform == "darwin":
+        # Remove Primary tag if it's <Primary><Mod2>
+            if "<Primary><Mod2>" in accel:
+                accel = accel.replace("<Primary>", "")
         self.config['keybindings'][binding] = accel
 
         plugin_keyb_desc = keybindutil.get_act_to_desc(binding)

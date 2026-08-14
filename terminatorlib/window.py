@@ -128,6 +128,7 @@ class Window(Container, Gtk.Window):
         self.connect('window-state-event', self.on_window_state_changed)
         self.connect('focus-out-event', self.on_focus_out)
         self.connect('focus-in-event', self.on_focus_in)
+        self.connect('realize', self.on_window_realize)
 
         # Attempt to grab a global hotkey for hiding the window.
         # If we fail, we'll never hide the window, iconifying instead.
@@ -394,7 +395,71 @@ class Window(Container, Gtk.Window):
             visual = screen.get_rgba_visual()
             if visual:
                 self.set_visual(visual)
-    
+
+    def on_window_realize(self, widget):
+        """Apply blur hint once the window is realized"""
+        profiles = self.config.base.profiles
+        should_blur = False
+        for profile in profiles.values():
+            if (profile.get('background_blur', False) and
+                    profile.get('background_type', 'solid') in ('transparent', 'image')):
+                should_blur = True
+                break
+        self.set_blur_behind(should_blur)
+
+    def set_blur_behind(self, enable=True):
+        """Set or remove the KDE blur-behind-window hint via X11 property"""
+        if display_manager() != 'X11':
+            return
+        if self.get_window() is None:
+            return
+
+        try:
+            import ctypes
+            import ctypes.util
+
+            libx11_path = ctypes.util.find_library('X11')
+            if not libx11_path:
+                dbg('set_blur_behind: libX11 not found')
+                return
+            libx11 = ctypes.cdll.LoadLibrary(libx11_path)
+
+            # Set explicit argtypes/restype to avoid pointer truncation on 64-bit
+            libx11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            libx11.XInternAtom.restype = ctypes.c_ulong
+
+            libx11.XChangeProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int
+            ]
+            libx11.XChangeProperty.restype = ctypes.c_int
+
+            libx11.XDeleteProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+            libx11.XDeleteProperty.restype = ctypes.c_int
+
+            libx11.XFlush.argtypes = [ctypes.c_void_p]
+            libx11.XFlush.restype = ctypes.c_int
+
+            display = ctypes.c_void_p(hash(GdkX11.x11_get_default_xdisplay()))
+            xid = self.get_window().get_xid()
+
+            blur_atom = libx11.XInternAtom(display, b'_KDE_NET_WM_BLUR_BEHIND_REGION', 0)
+            cardinal_atom = libx11.XInternAtom(display, b'CARDINAL', 0)
+
+            if enable:
+                data = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+                libx11.XChangeProperty(display, xid, blur_atom, cardinal_atom,
+                                       32, 0, data, 1)
+                dbg('set_blur_behind: enabled blur hint on window %s' % xid)
+            else:
+                libx11.XDeleteProperty(display, xid, blur_atom)
+                dbg('set_blur_behind: removed blur hint from window %s' % xid)
+
+            libx11.XFlush(display)
+        except Exception as e:
+            dbg('set_blur_behind: failed: %s' % e)
+
     def show(self, startup=False):
         """Undo the startup show request if started in hidden mode"""
         #Present is necessary to grab focus when window is hidden from taskbar.
@@ -916,6 +981,15 @@ class Window(Container, Gtk.Window):
 
             # Get the coordinate of the appropriate edge for this direction
             edge, p1, p2 = util.get_edge(allocation, direction)
+            cols, rows = self.get_size()
+            if ((direction == 'down' and edge >= rows) or
+                (direction == 'right' and edge >= cols)):
+                edge =  0
+            elif (direction == 'up' and edge == 0):
+                edge = rows
+            elif (direction == 'left' and edge == 0):
+                edge = cols
+
             # Find all visible terminals which are, in their entirety, in the
             # direction we want to move, and are at least partially spanning
             # p1 to p2
