@@ -1,0 +1,18 @@
+Package: terminator
+Version: @VERSION@
+Section: x11
+Priority: optional
+Architecture: all
+Maintainer: workstation-one <yinmochong989844@outlook.com>
+Installed-Size: @INSTALLED_SIZE@
+Provides: x-terminal-emulator
+Depends: python3:any, python3-cairo, python3-configobj, python3-dbus, python3-gi, python3-gi-cairo, python3-psutil, gir1.2-glib-2.0, gir1.2-gtk-3.0, gir1.2-pango-1.0, gir1.2-vte-2.91, gsettings-desktop-schemas, tmux
+Recommends: default-dbus-session-bus | dbus-session-bus, gir1.2-keybinder-3.0, gir1.2-notify-0.7, xdg-utils
+Homepage: https://github.com/gnome-terminator/terminator
+Description: multiple GNOME terminals in one window (agent-control patched)
+ Terminator 2.1.5 with stable pane labels, aggregated process/session
+ identity, verified atomic input submission, screen revisions, write leases,
+ structured layout control, screenshots, and tmux-backed headless sessions.
+ .
+ External agents can control GUI panes through the session D-Bus API and
+ manage headless PTY sessions with remotinator without creating GTK windows.

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+if command -v py3clean >/dev/null 2>&1; then
+    py3clean -p terminator || true
+fi
+
+exit 0

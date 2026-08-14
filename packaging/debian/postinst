@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+if command -v py3compile >/dev/null 2>&1; then
+    py3compile -p terminator /usr/lib/python3/dist-packages/terminatorlib || true
+fi
+
+exit 0

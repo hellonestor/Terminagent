@@ -1,0 +1,7 @@
+terminator (@VERSION@) noble; urgency=medium
+
+  * Add reliable agent session identity, verified submission, and revisions.
+  * Add structured split/layout control and tmux-backed headless sessions.
+  * Preserve the existing agent-control, screenshot, theme, and usability patches.
+
+ -- workstation-one <yinmochong989844@outlook.com>  @DATE@
