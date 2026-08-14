@@ -1,108 +1,238 @@
-# 用 remotinator 远程控制 Terminator(agent 指南)
+# 用 remotinator 控制 Terminator（agent 指南）
 
-本仓库的 Terminator 在原版基础上新增了一组 D-Bus 接口,使外部 agent 可以
-**读取**、**写入**、**截图**和**查询几何状态**任意已打开的终端面板(pane),
-配合原有接口即可完全控制 Terminator——包括控制面板里正在运行的交互式
-程序(claude、codex 等 TUI)。
+本分支为 Terminator 增加了面向 agent 的控制接口。接口分为两类：
 
-> 前提:必须运行本仓库打过补丁的 Terminator(先彻底退出系统旧版,再启动
-> 本仓库的 `./terminator`),并且 remotinator 与 Terminator 在同一桌面
-> 会话(相同 DISPLAY、相同 DBus session bus)下执行。
+- GUI pane：由 Terminator/VTE 持有，通过会话 D-Bus 读写、识别、编排和截图；
+- headless Session：由 tmux 作为过渡 PTY 后端持有，不创建 GTK Window、Tab 或 VTE，
+  Terminator 退出后仍可继续运行，并可按需 attach 到 GUI。
 
-## 命令总览
+`agent_label` 是稳定身份，不会被 shell、Claude、Codex 等程序发出的 OSC 0/2
+标题覆盖；`session_title` 始终保留前台程序给 VTE 的原始动态标题。
+
+## 前提
+
+- GUI 命令必须连接本仓库启动的补丁版 Terminator；先彻底退出系统旧版，再运行
+  本仓库的 `./terminator`。
+- `remotinator` 与 Terminator 必须处于同一 DISPLAY 和 D-Bus session。
+- headless 命令不依赖 Terminator/GTK，但当前过渡实现要求安装 tmux 3.x。
+- 指定 GUI pane 的命令使用 `-u/--uuid`；指定 headless Session 使用
+  `-i/--session` 或唯一的 `--label`。
+
+## 推荐的可靠工作流
 
 ```bash
-remotinator get_terminals                 # 列出所有终端的 UUID(忽略最后一行 None)
-remotinator get_focused_terminal          # 当前聚焦终端的 UUID
-remotinator get_terminal_text -u <UUID>   # 读取该终端当前可见屏幕内容
-remotinator get_terminal_text -u <UUID> -n 200    # 读取缓冲区最后 200 行
-remotinator get_terminal_text -u <UUID> -S        # 读取整个回滚缓冲区
-remotinator feed_terminal -u <UUID> -s '<文本>'   # 向该终端注入按键
-remotinator get_terminal_info -u <UUID>           # 查询尺寸/位置/可截图状态(JSON)
-remotinator screenshot_terminal -u <UUID> -f /tmp/shot.png      # 该面板截图(PNG,默认补成16:9)
-remotinator screenshot_terminal -u <UUID> -f /tmp/shot.png -w   # 截面板所在的整个窗口(默认补成16:9)
-remotinator screenshot_terminal -u <UUID> -f /tmp/raw.png --no-ratio  # 原始比例截图
-remotinator scrollshot_terminal -u <UUID> -f /tmp/long.png -n 1000     # 回滚区长截图(最近1000行)
-remotinator hsplit -u <UUID>              # 水平分屏(返回新终端 UUID)
-remotinator vsplit -u <UUID>              # 垂直分屏(返回新终端 UUID)
-remotinator new_tab -u <UUID>             # 新标签页(返回新终端 UUID)
-remotinator new_window                    # 新窗口(返回新终端 UUID)
+# 一次获取所有 pane 身份，不再逐个猜 UUID
+remotinator list_terminals --json
+
+# 设置不会被 OSC 标题覆盖的稳定标签
+remotinator set_terminal_label -u <UUID> --label 'Claude-1 / 主审'
+
+# 原子执行“输入、确认回显、发送 Enter”
+remotinator send --label 'Claude-1 / 主审' \
+  --text '继续审计这个组件' --submit --verify-echo
+
+# 等待屏幕稳定；也可等待指定文本
+remotinator wait_idle --label 'Claude-1 / 主审' \
+  --stable-ms 2000 --timeout 1800
+remotinator wait_idle -u <UUID> --contains 'All todos complete' --timeout 1800
 ```
 
-## feed_terminal 的按键转义
+`send --verify-echo` 的顺序固定为：写入文本、确认回显、发送 Enter、观察提交后的
+屏幕变化。回显失败时不会发送 Enter，命令返回非零退出码及结构化错误。返回示例：
 
-`-s` 参数支持以下转义序列,可组合出任意控制键:
+```json
+{
+  "ok": true,
+  "terminal_uuid": "urn:uuid:...",
+  "bytes_written": 27,
+  "enter_sent": true,
+  "echo_observed": true,
+  "input_cleared": true,
+  "state_transition": "idle->busy",
+  "screen_revision_before": 953,
+  "screen_revision_after": 957,
+  "sequence_id": 128
+}
+```
 
-| 写法 | 含义 |
-|------|------|
-| `\r` | 回车(Enter)——TUI 程序里提交输入用它,不是 `\n` |
-| `\n` | 换行 |
-| `\t` | Tab |
-| `\e` | Escape(`\e[A`/`\e[B`/`\e[C`/`\e[D` = 上/下/右/左方向键) |
-| `\xHH` | 任意字节,如 `\x03` = Ctrl-C,`\x04` = Ctrl-D,`\x1a` = Ctrl-Z |
-| `\\` | 字面反斜杠 |
+如需强制观察 busy 转换，可增加 `--wait-busy 5`。短命令可能在轮询前已经完成，
+这种情况下接口会以 `BUSY_NOT_OBSERVED` 明确失败；一般任务不必使用该选项。
 
-中文等多字节字符可直接写在 `-s` 里,不会被转义破坏。
+## 身份与聚合信息
 
-## 控制 claude / codex 等 TUI 的典型流程
+```bash
+remotinator get_terminal_title -u <UUID>
+remotinator get_terminal_info -u <UUID>
+remotinator set_terminal_label -u <UUID> --label 'GLM-2 / 内核审计'
+remotinator clear_terminal_label -u <UUID>
+remotinator list_terminals --json
+```
 
-1. 找到目标面板:`get_terminals` 列出 UUID,逐个 `get_terminal_text`
-   查看屏幕内容,识别哪个面板在跑 claude/codex。
-2. 输入一条指令并提交:
+聚合信息包含：
 
-   ```bash
-   remotinator feed_terminal -u <UUID> -s '帮我重构这个函数\r'
-   ```
+- `terminal_uuid`、`agent_label`、原始 `session_title`；
+- 稳定的 `tab_uuid`、`tab_title`、`window_uuid`、`window_title`；
+- `shell_pid`、`foreground_pid`、`foreground_process`、`foreground_argv`；
+- `cwd`、`last_activity_at`、`activity_state`、`screen_revision`；
+- 原有行列、光标、scrollback、窗口/显示器几何和 `screenshot_ready` 字段。
 
-3. 轮询读屏,等待对方输出稳定:
+显示标题优先级为：
 
-   ```bash
-   remotinator get_terminal_text -u <UUID>
-   ```
+```text
+agent_label > session_title > foreground command
+```
 
-   判定"回答完成"的可靠方法(实测有效):claude 在生成回答期间屏幕上会
-   显示 `esc to interrupt` 字样,codex 也有类似的忙碌提示。轮询时同时满足
-   以下两个条件才视为完成:
-   - 屏幕内容不再包含忙碌提示词(如 `esc to interrupt`);
-   - 连续两次读屏内容完全相同(防止 spinner 闪烁误判)。
+允许不同 pane 设置相同 label，但 `list_terminals` 会返回 `DUPLICATE_LABEL`
+警告；任何按 label 写入的操作遇到重复 label 都会以 `AMBIGUOUS_LABEL` 拒绝，
+绝不会任选一个目标。
 
-4. 需要确认/取消时发送相应按键,例如回车 `\r`、Esc `\e`、Ctrl-C `\x03`。
+## revision 与增量读屏
+
+```bash
+remotinator get_terminal_text -u <UUID>              # 当前可见屏幕
+remotinator get_terminal_text -u <UUID> -n 200       # 最近 200 行
+remotinator get_terminal_text -u <UUID> -S           # 整个保留 scrollback
+remotinator get_terminal_text -u <UUID> --since-revision 953
+```
+
+VTE 内容变化会递增 `screen_revision`。每个 pane 保留最近 128 个可见屏幕快照；
+若旧 revision 仍在且新屏幕是追加内容，返回真正的字符增量。TUI 原地重绘或旧快照
+已淘汰时返回当前完整屏幕，并标记 `full_snapshot=true`，避免把重绘误报为追加文本。
+
+当前 VTE 没有稳定的公开 API 判断 alternate screen，因此 `screen_mode` 暂时返回
+`unknown`；调用者不应据此推断主/备用屏幕。
+
+## 明确的按键输入
+
+旧接口继续兼容：
+
+```bash
+remotinator feed_terminal -u <UUID> -s 'ls -la\r'
+remotinator feed_terminal -u <UUID> -s '\x03'
+remotinator feed_terminal -u <UUID> -s 'ls -la' --enter
+```
+
+支持的转义为 `\r`、`\n`、`\t`、`\e`、`\xHH` 和 `\\`。中文可直接传入。
+新代码优先使用 `send --submit --verify-echo`，旧接口只保证字节已写给 PTY。
+
+## pane 租约
+
+```bash
+remotinator acquire_session -u <UUID> --owner codex-root --ttl 600
+remotinator acquire_session --label 'Claude-1' --owner codex-root --ttl 600
+remotinator release_session -u <UUID> --owner codex-root
+```
+
+读操作不要求租约。存在有效租约时，`send` 只有携带相同 `--owner` 才能写入；
+其他 owner 会得到 `SESSION_LEASED`、当前 owner 和过期时间。租约到期自动失效。
+
+## 原子分屏与布局树
+
+旧的 `hsplit/vsplit/new_tab/new_window` 仍可使用。统一分屏接口可同时指定位置、
+比例、cwd、命令、profile、label 和焦点：
+
+```bash
+remotinator split -u <TARGET_UUID> \
+  --orientation vertical --side right --ratio 0.42 \
+  --cwd /home/workstation/Desktop/security \
+  --execute 'claude' --label 'Claude-2' --focus false
+```
+
+- `vertical` 表示左右布局，side 只能是 `left/right`；
+- `horizontal` 表示上下布局，side 只能是 `top/bottom`；
+- ratio 是新 pane 所占比例，范围 `0.1..0.9`；
+- 返回值原子包含 `new_terminal_uuid`，无需重新枚举猜测新 pane。
+
+```bash
+remotinator get_layout --json
+remotinator get_layout --window-uuid <WINDOW_UUID> --json
+remotinator resize_pane -u <UUID> --ratio 0.60
+remotinator focus_terminal -u <UUID> --raise-window
+```
+
+`get_layout` 返回真实 Window → Notebook/Tab → HPaned/VPaned → Terminal 树、分割
+比例和稳定 tab UUID，不是平铺列表。
+
+## 真正的 headless Session
+
+创建、列出、读写、等待和终止均不创建 GUI：
+
+```bash
+remotinator create_session --headless \
+  --label 'GLM-2 / Avahi 审计' \
+  --cwd /home/workstation/Desktop/security \
+  --execute 'claude'
+
+remotinator list_sessions --json
+remotinator get_session_text -i <SESSION_ID> -n 200
+remotinator feed_session -i <SESSION_ID> \
+  --text '继续分析' --submit --verify-echo
+remotinator wait_session -i <SESSION_ID> --stable-ms 2000 --timeout 1800
+remotinator wait_session -i <SESSION_ID> --contains '完成' --timeout 1800
+```
+
+`list_sessions` 在补丁版 GUI 可用时合并 GUI 与 headless Session；没有 GUI/D-Bus
+时仍可独立列出 headless Session。
+
+需要人工查看或截图时再 attach：
+
+```bash
+remotinator attach_session -i <SESSION_ID> --new-tab -u <REFERENCE_UUID>
+remotinator attach_session -i <SESSION_ID> --split-right \
+  -u <TARGET_UUID> --ratio 0.5
+
+remotinator detach_session -i <SESSION_ID>
+remotinator terminate_session -i <SESSION_ID> --signal TERM
+```
+
+attach 只启动 tmux view，不重启 Session；detach 会断开所有 view，但 Session 和
+scrollback 继续存在。`terminate_session` 向进程组发送指定信号并确认 tmux Session
+已消失。当前 tmux 后端是独立 PTY 的过渡实现，未来可替换为 `terminator-agentd`
+而不改变这些 CLI 语义。
+
+限制：一个 tmux Session 同时 attach 到多个可见 pane 时，所有 view 共享同一终端
+尺寸和输入流；需要独占操作时应配合 label/owner 约定。
 
 ## 截图
 
-`screenshot_terminal` 把终端渲染后的画面存为 PNG,成功时输出保存路径
-(自动补 `.png` 后缀),失败时输出 `ERROR: ...`。默认规则是输出图片保持
-16:9:原始画面不缩放、不裁剪,只在左右或上下补黑边;确实需要原始控件比例时
-加 `--no-ratio`。
-
-读文本用 `get_terminal_text`(快、可解析);需要"看见"颜色、TUI 布局或图形
-输出时用截图。截图取自 GTK 控件的渲染缓冲,目标面板必须真实显示在屏幕上
-(所在标签页处于前台、窗口未最小化),否则可能截到空白或报错;而
-`feed_terminal`/`get_terminal_text` 没有这个限制。
-
-截图前可先调用:
-
 ```bash
 remotinator get_terminal_info -u <UUID>
+remotinator screenshot_terminal -u <UUID> -f /tmp/pane.png
+remotinator screenshot_terminal -u <UUID> -f /tmp/window.png -w
+remotinator screenshot_terminal -u <UUID> -f /tmp/raw.png --no-ratio
+remotinator screenshot_terminal -u <UUID> -f /tmp/background-pane.png \
+  --activate --restore --wait-frame
+remotinator scrollshot_terminal -u <UUID> -f /tmp/long.png -n 1000
 ```
 
-返回 JSON 里重点看这些字段:
+默认截图只补黑边到 16:9，不缩放、不裁剪；`--no-ratio` 保留原始比例。
+普通截图仍要求 GTK 控件已 realized。`--activate` 会选择目标标签、恢复最小化窗口并
+等待一帧，`--restore` 在截图后恢复原焦点/最小化状态。
 
-- `screenshot_ready`: 推荐的总判断,为 `true` 时窗口/面板已 realized、viewable,
-  且完整落在显示器范围内。
-- `window_fully_on_monitor` / `terminal_fully_on_monitor`: 窗口/面板是否完整在
-  显示器几何范围内。
-- `window_fully_in_workarea` / `terminal_fully_in_workarea`: 是否完整在工作区内
-  (避开系统面板/dock)。
-- `window_rect` / `terminal_rect` / `monitor_geometry` / `monitor_workarea`: 具体
-  坐标与尺寸,用于 agent 自己判断是否需要移动或调整窗口。
+## JSON 错误、退出码与审计
 
-`scrollshot_terminal` 生成回滚区长截图,默认截最近 2000 行,可用 `-n/--lines`
-改行数。长截图不会补成 16:9,因为它的目标是保留连续回滚内容;请求过大时会
-返回 `ERROR: Requested scrollshot too large`,此时减小 `-n`。
+新 agent 接口全部返回 JSON。失败时 `ok=false` 且 remotinator 退出码非零，例如：
 
-注意:
-- 写入是直接送进程序的标准输入(pty),无需该面板获得焦点。
-- `feed_terminal` 成功返回 `OK`,UUID 不存在时返回 `ERROR: ...`。
-- 部分 TUI 对粘贴式整段输入的处理与逐键输入不同;如遇问题可把文本与
-  `\r` 分成两次 `feed_terminal` 发送。
+```json
+{
+  "ok": false,
+  "code": "AMBIGUOUS_LABEL",
+  "message": "label matches multiple terminals",
+  "retryable": false,
+  "matches": ["urn:uuid:...", "urn:uuid:..."]
+}
+```
+
+主要错误码包括 `TERMINAL_NOT_FOUND`、`SESSION_NOT_FOUND`、
+`AMBIGUOUS_LABEL`、`SESSION_LEASED`、`INPUT_NOT_ECHOED`、
+`BUSY_NOT_OBSERVED`、`WAIT_TIMEOUT`、`INVALID_LAYOUT`、
+`INVALID_CWD`、`PROCESS_STILL_RUNNING` 和 `HEADLESS_BACKEND_ERROR`。
+
+操作元数据写入：
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/terminator/agent-control.jsonl
+```
+
+文件权限固定为 `0600`。日志记录时间、目标、label/owner、操作类型、Enter 状态、
+前后 revision、文本 UTF-8 字节数和 SHA-256；不保存输入正文，避免泄露口令。

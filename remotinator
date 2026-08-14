@@ -23,16 +23,34 @@ import os
 import sys
 import argparse
 
+from terminatorlib.agent_control import (
+    AgentControlError,
+    capture_headless_text,
+    create_headless_session,
+    decode_key_escapes,
+    detach_headless_session,
+    feed_headless_session,
+    list_headless_sessions,
+    resolve_headless_session,
+    terminate_headless_session,
+    wait_headless_session,
+)
+
 from terminatorlib.util import dbg, err
 from terminatorlib.version import APP_VERSION
-try:
-    from terminatorlib import ipc
-except ImportError:
-    err('Unable to initialise Terminator remote library. This probably means dbus is not available')
-    sys.exit(1)
 from terminatorlib.translation import _
 
 APP_NAME='remotinator'
+
+
+def load_ipc():
+    """Load GUI/D-Bus support lazily so headless commands need no GUI."""
+    try:
+        from terminatorlib import ipc
+        return ipc
+    except ImportError:
+        err('Unable to initialise Terminator remote library. This probably means dbus is not available')
+        sys.exit(1)
 
 COMMANDS={
     #  Command             uuid req.    Description
@@ -40,22 +58,42 @@ COMMANDS={
     'new_tab':              [True,  _('Open a new tab')],
     'hsplit':               [True,  _('Split the current terminal horizontally')],
     'vsplit':               [True,  _('Split the current terminal vertically')],
+    'split':                [True,  _('Split with side, ratio, cwd, command and label')],
     'get_terminals':        [False, _('Get a list of all terminals')],
+    'list_terminals':       [False, _('Get aggregated terminal identities as JSON')],
     'get_focused_terminal': [False, _('Get the uuid of the current focused terminal')],
     'get_window':           [True,  _('Get the UUID of a parent window')],
     'get_window_title':     [True,  _('Get the title of a parent window')],
     'get_tab':              [True,  _('Get the UUID of a parent tab')],
     'get_tab_title':        [True,  _('Get the title of a parent tab')],
+    'get_terminal_title':   [True,  _('Get all terminal title/identity layers as JSON')],
+    'set_terminal_label':   [True,  _('Set a stable agent label')],
+    'clear_terminal_label': [True,  _('Clear a stable agent label')],
     'set_tab_title':        [True,  _('Set the title of a parent tab')],
     'bg_img':               [True,  _('Set the background image')],
     'bg_img_all':           [False, _('Set the background image for all terminals')],
     'switch_profile':       [True,  _('Switch current terminal profile')],
     'switch_profile_all':   [False, _('Switch profile of all currently running terminals')],
     'feed_terminal':        [True,  _('Type text into a terminal (use with -s, see --help)')],
+    'send':                 [False, _('Type text and atomically submit/verify it')],
     'get_terminal_text':    [True,  _('Get the text content of a terminal')],
+    'wait_idle':            [False, _('Wait for a terminal to become stable/idle')],
+    'acquire_session':      [False, _('Acquire or renew a terminal write lease')],
+    'release_session':      [False, _('Release a terminal write lease')],
+    'get_layout':           [False, _('Get the real window/tab/pane layout tree')],
+    'resize_pane':          [True,  _('Resize a pane by ratio')],
+    'focus_terminal':       [True,  _('Select and focus a terminal')],
     'screenshot_terminal':  [True,  _('Save a 16:9 PNG screenshot of a terminal (use with -f, add -w for the whole window)')],
     'scrollshot_terminal':  [True,  _('Save a long PNG screenshot covering the scrollback (use with -f, optionally -n)')],
     'get_terminal_info':    [True,  _('Get terminal/window geometry and state as JSON')],
+    'create_session':       [False, _('Create a true headless tmux-backed PTY session')],
+    'list_sessions':        [False, _('List headless sessions as JSON')],
+    'get_session_text':     [False, _('Read a headless session')],
+    'feed_session':         [False, _('Write to a headless session')],
+    'wait_session':         [False, _('Wait for a headless session')],
+    'attach_session':       [True,  _('Attach a headless session to a tab or split')],
+    'detach_session':       [False, _('Detach all views while keeping a session alive')],
+    'terminate_session':    [False, _('Terminate a headless session')],
     }
 
 if __name__ == '__main__':
@@ -96,10 +134,30 @@ if __name__ == '__main__':
     parser.add_argument('-T', '--title', dest='title', type=str, default=argparse.SUPPRESS,
                 help=_('Tab name to set.'))
 
+    parser.add_argument('--label', dest='label', type=str,
+                default=argparse.SUPPRESS,
+                help=_('Stable agent label, or a unique label used for lookup'))
+
     parser.add_argument('-s', '--text', dest='text', type=str, default=argparse.SUPPRESS,
                 help=_('Text to type into the terminal. Only used with "feed_terminal". '
                        'Backslash escapes \\n \\r \\t \\e \\\\ and \\xHH are interpreted, '
                        'e.g. -s \'ls -l\\r\' runs a command, -s \'\\x03\' sends Ctrl-C.'))
+
+    parser.add_argument('--submit', dest='submit', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Send Enter after text in the same operation'))
+
+    parser.add_argument('--enter', dest='enter', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Append Enter to feed_terminal in the same D-Bus call'))
+
+    parser.add_argument('--verify-echo', dest='verify_echo',
+                action='store_const', const='True', default=argparse.SUPPRESS,
+                help=_('Confirm text is visible before sending Enter'))
+
+    parser.add_argument('--wait-busy', dest='wait_busy', type=str,
+                default=argparse.SUPPRESS, metavar='SECONDS',
+                help=_('Wait for a busy transition after submitting'))
 
     parser.add_argument('-n', '--lines', dest='lines', type=str, default=argparse.SUPPRESS,
                 help=_('Number of trailing buffer lines. Used with "get_terminal_text" '
@@ -109,6 +167,82 @@ if __name__ == '__main__':
     parser.add_argument('-S', '--scrollback', dest='scrollback', action='store_const', const='True',
                 default=argparse.SUPPRESS,
                 help=_('Fetch the entire scrollback buffer. Only used with "get_terminal_text".'))
+
+    parser.add_argument('--since-revision', dest='since_revision', type=str,
+                default=argparse.SUPPRESS, metavar='REVISION',
+                help=_('Return screen changes since a revision as JSON'))
+
+    parser.add_argument('--stable-ms', dest='stable_ms', type=str,
+                default=argparse.SUPPRESS, metavar='MILLISECONDS')
+
+    parser.add_argument('--timeout', dest='timeout', type=str,
+                default=argparse.SUPPRESS, metavar='SECONDS')
+
+    parser.add_argument('--contains', dest='contains', type=str,
+                default=argparse.SUPPRESS, metavar='TEXT')
+
+    parser.add_argument('--owner', dest='owner', type=str,
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--ttl', dest='ttl', type=str,
+                default=argparse.SUPPRESS, metavar='SECONDS')
+
+    parser.add_argument('--orientation', dest='orientation', type=str,
+                choices=('horizontal', 'vertical'), default=argparse.SUPPRESS)
+
+    parser.add_argument('--side', dest='side', type=str,
+                choices=('left', 'right', 'top', 'bottom'),
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--ratio', dest='ratio', type=str,
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--cwd', dest='cwd', type=str,
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--focus', dest='focus', type=str,
+                choices=('true', 'false'), default=argparse.SUPPRESS)
+
+    parser.add_argument('--raise-window', dest='raise_window',
+                action='store_const', const='True', default=argparse.SUPPRESS)
+
+    parser.add_argument('--window-uuid', dest='window_uuid', type=str,
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('-i', '--session', dest='session_id', type=str,
+                default=argparse.SUPPRESS,
+                help=_('Headless session ID'))
+
+    parser.add_argument('--headless', dest='headless', action='store_const',
+                const='True', default=argparse.SUPPRESS)
+
+    parser.add_argument('--stdin', dest='stdin', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Read text from standard input'))
+
+    attach_group = parser.add_mutually_exclusive_group()
+    attach_group.add_argument('--new-tab', dest='attach_mode',
+                action='store_const', const='new-tab',
+                default=argparse.SUPPRESS)
+    attach_group.add_argument('--split-left', dest='attach_mode',
+                action='store_const', const='split-left',
+                default=argparse.SUPPRESS)
+    attach_group.add_argument('--split-right', dest='attach_mode',
+                action='store_const', const='split-right',
+                default=argparse.SUPPRESS)
+    attach_group.add_argument('--split-top', dest='attach_mode',
+                action='store_const', const='split-top',
+                default=argparse.SUPPRESS)
+    attach_group.add_argument('--split-bottom', dest='attach_mode',
+                action='store_const', const='split-bottom',
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--signal', dest='signal', type=str,
+                default=argparse.SUPPRESS)
+
+    parser.add_argument('--json', dest='json', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Request structured JSON output'))
 
     parser.add_argument('-w', '--window', dest='window', action='store_const', const='True',
                 default=argparse.SUPPRESS,
@@ -120,6 +254,19 @@ if __name__ == '__main__':
                 help=_('Do not letterbox the screenshot to a 16:9 aspect ratio. '
                        'Only used with "screenshot_terminal".'))
 
+    parser.add_argument('--activate', dest='activate', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Activate a hidden tab/window before taking a screenshot'))
+
+    parser.add_argument('--restore', dest='restore', action='store_const',
+                const='True', default=argparse.SUPPRESS,
+                help=_('Restore the prior focus/minimized state after activation'))
+
+    parser.add_argument('--wait-frame', dest='wait_frame', nargs='?',
+                const='0.1', type=str, default=argparse.SUPPRESS,
+                metavar='SECONDS',
+                help=_('Wait for GTK rendering after screenshot activation'))
+
     parser.add_argument('-v', '--version', action='version', version='%%(prog)s %s' %(APP_VERSION))
 
     options = vars(parser.parse_args())     # Straight to dict
@@ -128,15 +275,115 @@ if __name__ == '__main__':
     command = options['command'][0]
     del options['command']
 
-    func = getattr(ipc, command)
+    def emit_result(result):
+        if result is None:
+            return
+        if isinstance(result, (dict, list)):
+            import json
+            output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        else:
+            output = str(result)
+        print(output)
+        failed = output.startswith('ERROR:')
+        try:
+            import json
+            parsed = json.loads(output)
+            failed = isinstance(parsed, dict) and parsed.get('ok') is False
+        except (TypeError, ValueError):
+            pass
+        if failed:
+            sys.exit(1)
+
+    headless_commands = {
+        'create_session', 'list_sessions', 'get_session_text',
+        'feed_session', 'wait_session', 'attach_session',
+        'detach_session', 'terminate_session',
+    }
+    if command in headless_commands:
+        try:
+            if command == 'create_session':
+                result = create_headless_session(
+                    options.get('label'), options.get('cwd'),
+                    options.get('execute'))
+            elif command == 'list_sessions':
+                result = list_headless_sessions()
+                # When a patched GUI is available, expose GUI and headless
+                # sessions through the same inventory.  Headless-only use
+                # remains independent of Terminator and D-Bus.
+                try:
+                    ipc_module = load_ipc()
+                    bus = ipc_module.dbus.SessionBus()
+                    if bus.name_has_owner(ipc_module.BUS_NAME):
+                        gui_result = ipc_module.list_terminals(
+                            {'json': 'True'})
+                        import json
+                        gui_terminals = json.loads(gui_result).get(
+                            'terminals', [])
+                        for terminal in gui_terminals:
+                            terminal['session_id'] = (
+                                'gui:' + terminal['terminal_uuid'])
+                            terminal['headless'] = False
+                            terminal['attached_views'] = 1
+                        result['sessions'] = (
+                            gui_terminals + result['sessions'])
+                except (Exception, SystemExit):
+                    pass
+            elif command == 'get_session_text':
+                result = capture_headless_text(
+                    options.get('session_id'), options.get('label'),
+                    options.get('lines', 200))
+            elif command == 'feed_session':
+                text_value = options.get('text')
+                if options.get('stdin') == 'True':
+                    text_value = sys.stdin.read()
+                if text_value is None:
+                    raise AgentControlError(
+                        'NO_TEXT', 'no text supplied (use --text or --stdin)')
+                result = feed_headless_session(
+                    options.get('session_id'), options.get('label'),
+                    decode_key_escapes(text_value),
+                    options.get('submit') == 'True',
+                    options.get('verify_echo') == 'True')
+            elif command == 'wait_session':
+                result = wait_headless_session(
+                    options.get('session_id'), options.get('label'),
+                    options.get('stable_ms', 2000),
+                    options.get('timeout', 1800), options.get('contains'))
+            elif command == 'detach_session':
+                result = detach_headless_session(
+                    options.get('session_id'), options.get('label'))
+            elif command == 'terminate_session':
+                result = terminate_headless_session(
+                    options.get('session_id'), options.get('label'),
+                    options.get('signal', 'TERM'))
+            elif command == 'attach_session':
+                resolved = resolve_headless_session(
+                    options.get('session_id'), options.get('label'))
+                options['backend_id'] = resolved['backend_id']
+                options['label'] = (options.get('label') or
+                                    resolved.get('agent_label') or '')
+                options.setdefault('cwd', resolved.get('cwd') or os.getcwd())
+                options.setdefault('attach_mode', 'new-tab')
+                uuid = options.get('uuid', os.environ.get('TERMINATOR_UUID'))
+                if not uuid:
+                    raise AgentControlError(
+                        'TERMINAL_NOT_FOUND',
+                        'attach_session needs a reference --uuid')
+                result = load_ipc().attach_headless(uuid, options)
+            emit_result(result)
+        except AgentControlError as ex:
+            emit_result(ex.as_dict())
+        sys.exit(0)
+
+    func = getattr(load_ipc(), command)
     uuid_required = COMMANDS[command][0]
 
     if uuid_required:
         uuid = options.get('uuid', os.environ.get('TERMINATOR_UUID'))
         if uuid:
-            print(str(func(uuid, options)))
+            emit_result(func(uuid, options))
         else:
             err("$TERMINATOR_UUID is not set, or passed as an option.")
             sys.exit(1)
     else:
-        print(str(func(options)))
+        emit_result(func(options))

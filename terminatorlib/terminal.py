@@ -6,6 +6,7 @@
 import os
 import signal
 import time
+from collections import deque
 import gi
 from gi.repository import GLib, GObject, Pango, Gtk, Gdk, GdkPixbuf, cairo
 gi.require_version('Vte', '2.91')  # vte-0.38 (gnome-3.14)
@@ -125,6 +126,16 @@ class Terminal(Gtk.VBox):
     def __init__(self):
         """Class initialiser"""
         GObject.GObject.__init__(self)
+
+        # Agent-control identity and activity metadata deliberately live on
+        # the Terminal wrapper rather than in the VTE title.  Applications are
+        # free to replace the OSC 0/2 title at any time; an explicit label must
+        # remain stable while that happens.
+        self.agent_label = None
+        self.screen_revision = 0
+        self.last_activity_at = time.time()
+        self.last_activity_monotonic = time.monotonic()
+        self._agent_screen_history = deque(maxlen=128)
 
         self.terminator = Terminator()
         self.terminator.register_terminal(self)
@@ -519,6 +530,8 @@ class Terminal(Gtk.VBox):
 
         self.cnxids.new(self.vte, 'window-title-changed', lambda x:
             self.emit('title-change', self.get_window_title()))
+        self.cnxids.new(self.vte, 'contents-changed',
+            self._record_screen_change)
         self.cnxids.new(self.vte, 'grab-focus', self.on_vte_focus)
         self.cnxids.new(self.vte, 'focus-in-event', self.on_vte_focus_in)
         self.cnxids.new(self.vte, 'focus-out-event', self.on_vte_focus_out)
@@ -1004,7 +1017,93 @@ class Terminal(Gtk.VBox):
 
     def get_window_title(self):
         """Return the window title"""
-        return self.vte.get_window_title() or str(self.command)
+        return (self.agent_label or self.get_session_title() or
+                str(self.command))
+
+    def get_session_title(self):
+        """Return the unmodified title supplied by the foreground program."""
+        return self.vte.get_window_title() or ''
+
+    def set_agent_label(self, label):
+        """Set a stable, agent-facing label independent of OSC titles."""
+        label = str(label).strip() if label is not None else ''
+        self.agent_label = label or None
+        self.emit('title-change', self.get_window_title())
+
+    def get_text(self, lines=0, scrollback=False):
+        """Read retained VTE text using the cursor's absolute row space."""
+        vadj = self.vte.get_vadjustment()
+        _col, last_row = self.vte.get_cursor_position()
+        retained = max(1, int(vadj.get_upper() - vadj.get_lower()))
+        if scrollback:
+            start_row = max(0, last_row - retained + 1)
+        else:
+            try:
+                lines = int(lines)
+            except (TypeError, ValueError):
+                lines = 0
+            if lines <= 0:
+                lines = self.vte.get_row_count()
+            start_row = max(0, last_row - lines + 1)
+        end_col = self.vte.get_column_count() - 1
+        if Vte.get_minor_version() < 72:
+            text = self.vte.get_text_range(
+                start_row, 0, last_row, end_col, lambda *a: True)[0]
+        else:
+            text = self.vte.get_text_range_format(
+                Vte.Format.TEXT, start_row, 0, last_row, end_col)[0]
+        return text or ''
+
+    def _record_screen_change(self, _widget=None):
+        """Record a bounded visible-screen snapshot for incremental reads."""
+        try:
+            text = self.get_text()
+        except Exception as ex:
+            dbg('unable to snapshot changed terminal contents: %s' % ex)
+            text = ''
+        if self._agent_screen_history and \
+                self._agent_screen_history[-1][1] == text:
+            return
+        self.screen_revision += 1
+        self.last_activity_at = time.time()
+        self.last_activity_monotonic = time.monotonic()
+        self._agent_screen_history.append((self.screen_revision, text))
+
+    def get_text_since(self, revision):
+        """Return text added since a retained visible-screen revision.
+
+        Terminal UIs frequently redraw in place.  When the old screen is not
+        an exact prefix, callers receive the current screen as a marked full
+        snapshot instead of a misleading character delta.
+        """
+        try:
+            revision = int(revision)
+        except (TypeError, ValueError):
+            revision = -1
+        current_text = self.get_text()
+        current_revision = self.screen_revision
+        if revision == current_revision:
+            return {
+                'text': '',
+                'screen_revision': current_revision,
+                'full_snapshot': False,
+            }
+        old_text = None
+        for item_revision, item_text in self._agent_screen_history:
+            if item_revision == revision:
+                old_text = item_text
+                break
+        if old_text is not None and current_text.startswith(old_text):
+            return {
+                'text': current_text[len(old_text):],
+                'screen_revision': current_revision,
+                'full_snapshot': False,
+            }
+        return {
+            'text': current_text,
+            'screen_revision': current_revision,
+            'full_snapshot': True,
+        }
 
     def on_group_button_press(self, widget, event):
         """Handler for the group button"""
@@ -1922,6 +2021,8 @@ class Terminal(Gtk.VBox):
         title = self.titlebar.get_custom_string()
         if title:
             layout['title'] = title
+        if self.agent_label:
+            layout['agent_label'] = self.agent_label
         layout['uuid'] = self.uuid
         if save_cwd:
             layout['directory'] = self.get_cwd()
@@ -1944,6 +2045,8 @@ class Terminal(Gtk.VBox):
             self.really_create_group(self.titlebar, layout['group'])
         if 'title' in layout and layout['title'] != '':
             self.titlebar.set_custom_string(layout['title'])
+        if 'agent_label' in layout and layout['agent_label'] != '':
+            self.set_agent_label(layout['agent_label'])
         if 'directory' in layout and layout['directory'] != '':
             self.directory = layout['directory']
         if 'uuid' in layout and layout['uuid'] != '':

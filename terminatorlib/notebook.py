@@ -147,6 +147,9 @@ class Notebook(Container, Gtk.Notebook):
                 if labeltext and labeltext != "None":
                     label = self.get_tab_label(page)
                     label.set_custom_label(labeltext)
+            if 'tab_uuids' in layout and len(layout['tab_uuids']) > num:
+                label = self.get_tab_label(page)
+                label.uuid = make_uuid(layout['tab_uuids'][num])
             page.create_layout(children[child_key])
 
             if  layout.get('last_active_term',  None):
@@ -590,6 +593,11 @@ class TabLabel(Gtk.HBox):
     def __init__(self, title, notebook):
         """Class initialiser"""
         GObject.GObject.__init__(self)
+
+        # A tab is not a Factory product, so give its label an explicit UUID.
+        # The label object survives pane splits and tab reordering, making this
+        # a more stable tab identity than a page index or root pane UUID.
+        self.uuid = make_uuid()
 
         self.notebook = notebook
         self.terminator = Terminator()
