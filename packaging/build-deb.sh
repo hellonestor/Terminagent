@@ -63,6 +63,10 @@ install -m 0644 "$source_dir/AGENTS.md" \
 install -m 0644 "$source_dir/COPYING" \
     "$package_root/usr/share/doc/terminator/copyright"
 
+install -d -m 0755 "$package_root/usr/bin"
+install -m 0755 "$source_dir/mcp_server.py" \
+    "$package_root/usr/bin/terminagent-mcp-server"
+
 debian_date=$(date --date="@$source_date_epoch" --rfc-email)
 sed -e "s/@VERSION@/$version/g" \
     -e "s/@DATE@/$debian_date/g" \

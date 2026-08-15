@@ -5,4 +5,87 @@ if command -v py3compile >/dev/null 2>&1; then
     py3compile -p terminator /usr/lib/python3/dist-packages/terminatorlib || true
 fi
 
+# ---------------------------------------------------------------------------
+# Auto-register the Terminagent guide MCP server for every local user's
+# coding-agent configs. Idempotent: skips servers already present.
+# Supported: Claude Code (~/.claude.json), Codex (~/.codex/config.toml),
+#            MiMoCode (~/.config/mimocode/mimocode.jsonc)
+# ---------------------------------------------------------------------------
+MCP_CMD="/usr/bin/terminagent-mcp-server"
+
+register_for_user() {
+    home="$1"
+    [ -d "$home" ] || return 0
+
+    # --- Claude Code ---
+    claude_json="$home/.claude.json"
+    if [ -f "$claude_json" ]; then
+        tmp="${claude_json}.terminagent.tmp"
+        python3 - "$claude_json" "$MCP_CMD" <<'PYEOF'
+import json, sys
+path, cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+except (OSError, ValueError):
+    cfg = {}
+servers = cfg.setdefault("mcpServers", {})
+if "terminagent" not in servers:
+    servers["terminagent"] = {"type": "stdio", "command": cmd}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    print("registered terminagent in", path)
+PYEOF
+        [ -f "$tmp" ] && rm -f "$tmp"
+        chown "$(stat -c %u:%g "$claude_json")" "$claude_json" 2>/dev/null || true
+    fi
+
+    # --- Codex ---
+    codex_toml="$home/.codex/config.toml"
+    if [ -f "$codex_toml" ]; then
+        if ! grep -q '^\[mcp_servers.terminagent\]' "$codex_toml" 2>/dev/null; then
+            {
+                printf '\n[mcp_servers.terminagent]\n'
+                printf 'command = "%s"\n' "$MCP_CMD"
+            } >> "$codex_toml"
+            echo "registered terminagent in $codex_toml"
+        fi
+    fi
+
+    # --- MiMoCode (jsonc, keep comments by pure text append) ---
+    mimo_jsonc="$home/.config/mimocode/mimocode.jsonc"
+    if [ -f "$mimo_jsonc" ]; then
+        if ! grep -q '"terminagent"' "$mimo_jsonc" 2>/dev/null; then
+            python3 - "$mimo_jsonc" "$MCP_CMD" <<'PYEOF'
+import json, re, sys
+path, cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+except OSError:
+    sys.exit(0)
+# strip comments for parsing (naive: only /* */ and // outside strings)
+no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+no_comments = re.sub(r'(?m)^\s*//.*$', '', no_comments)
+try:
+    cfg = json.loads(no_comments)
+except ValueError:
+    sys.exit(0)
+if isinstance(cfg, dict) and "terminagent" not in cfg.get("mcp", {}):
+    # insert mcp block before final closing brace
+    block = '\n  "mcp": {\n    "terminagent": {\n      "type": "local",\n      "command": ["%s"]\n    }\n  }\n' % cmd
+    idx = text.rfind("}")
+    text = text[:idx] + block.rstrip("\n") + "\n" + text[idx:]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("registered terminagent in", path)
+PYEOF
+        fi
+    fi
+}
+
+for home in /home/*; do
+    register_for_user "$home"
+done
+
 exit 0

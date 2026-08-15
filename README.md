@@ -1,97 +1,112 @@
-Terminator
-==========
+# Terminagent
 
-Started by Chris Jones <cmsj@tenshu.net> in 2007, maintained from 2014 to 2020 by Stephen Boddy, currently maintained by Matt Rose. Terminator has had contributions from countless others listed in the [AUTHORS](AUTHORS) file
+[English](README.md) | [中文](README.zh.md)
 
-## Description
+Terminagent is a fork of [Terminator](https://github.com/gnome-terminator/terminator) (GPL v2), based on its 2.1.5 release. It keeps all upstream features (multi-tab/multi-pane, grouping, layouts, config files, etc.) intact and adds an agent-oriented remote control layer (`remotinator` CLI + D-Bus): screen reading, remote input, layout orchestration, and headless sessions.
 
-Terminator was originally developed by Chris Jones in 2007 as a simple, 300-ish line python script.  Since then, it has become The Robot Future of Terminals.  Originally inspired by projects like quadkonsole and gnome-multi-term and more recently by projects like Iterm2, and Tilix, It lets you combine and recombine terminals to suit the style you like.  If you live at the command-line, or are logged into 10 different remote machines at once, you should definitely try out Terminator.
+Credit goes to the upstream Terminator and its maintainers (Chris Jones, Stephen Boddy, Matt Rose) and all contributors — everything in this project builds on their years of work.
 
-When you run **`Terminator`**, you will get a terminal in a window, just like almost 
-every other terminal emulator available. There is also a titlebar which will
-update as shells/programs inside the terminal tell it to. Also on the titlebar
-is a small button that opens the grouping menu. From here you can put terminals
-into groups, which allows you to control multiple terminals simultaneously.
+## What's new
 
-## New home on GitHub
+**Remote control (remotinator)**
+- Discovery & targeting: `list_terminals --json`, `get_terminal_info`, stable labels `set_terminal_label`
+- Layout orchestration: `split` (side/ratio/cwd/command/label), `get_layout`, `resize_pane`, `focus_terminal`
+- Remote input: `send` (submit with atomic echo verification), `feed_terminal` (raw keys)
+- Screen reading: `get_terminal_text`, `screenshot_terminal` (16:9 PNG), `scrollshot_terminal` (tall scrollback PNG)
+- Status waiting: `wait_idle` (stability detection), `get_window_title`, `get_tab_title`
+- Multi-agent coordination: `acquire_session` / `release_session` write leases
 
-In April of 2020 we started moving **`Terminator`** to GitHub. A new team wanted to continue the work of the original authors.
+**Headless sessions (tmux backend)**
+- `create_session` — persistent PTY session without GUI
+- `list_sessions` / `get_session_text` / `feed_session` / `wait_session`
+- `attach_session` — attach back to a GUI tab; `detach_session` / `terminate_session`
 
-You can find the project on https://github.com/gnome-terminator/terminator
+**Other**
+- auto_theme plugin (`terminatorlib/plugins/auto_theme.py`)
+- Reproducible Debian packaging (`packaging/build-deb.sh`, artifact `dist/*.deb`)
+- Terminal usability improvements (search bar, popup menu, window behavior)
+
+## Usage
+
+```bash
+# Install
+sudo dpkg -i dist/terminator_2.1.5-agent4_all.deb
+```
+
+### MCP auto-registration
+
+The deb automatically registers a lightweight **guide MCP server**
+(`/usr/bin/terminagent-mcp-server`, stdlib-only, no runtime deps) into every
+local user's Claude Code (`~/.claude.json`), Codex (`~/.codex/config.toml`)
+and MiMoCode (`~/.config/mimocode/mimocode.jsonc`) configs. It exposes four
+tools that teach the agent how to drive the terminal:
+
+- `get_usage_guide` — capabilities, constraints, quick workflow
+- `get_command_reference` — remotinator subcommand cheatsheet
+- `get_workflow` — reliable GUI-pane / headless / lease workflows
+- `get_constraints` — mandatory operational rules
+
+Registration is idempotent (skips existing entries). To register manually:
+
+```bash
+# Claude Code
+claude mcp add terminagent -- /usr/bin/terminagent-mcp-server
+```
+
+### Recommended: start Terminator on login
+
+Agent GUI control needs the patched Terminator running. Recommended
+autostart (per user):
+
+```bash
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/terminator.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Terminagent
+Exec=/usr/bin/terminator
+X-GNOME-Autostart-enabled=true
+EOF
+```
+
+Alternatively as a systemd user service (`~/.config/systemd/user/terminator.service`):
+
+```ini
+[Unit]
+Description=Terminagent (patched Terminator)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/terminator --no-sandbox
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now terminator.service
+```
+
+Agent-side control:
+
+```bash
+remotinator list_terminals --json
+remotinator set_terminal_label -u <UUID> --label 'work'
+remotinator send --label 'work' --text 'ls -la' --submit --verify-echo
+remotinator get_terminal_text -u <UUID> -n 200
+```
+
+Full protocol and workflows: `AGENT_CONTROL.md`, `REMOTINATOR_USAGE.md`.
 
 ## Installing
 
-Terminator is available for most (if not all) Linux distributions from the distribution's repository of binary packages.  It is also available on FreeBSD.   Please search your repository for `terminator`  If you want to find information on how to enable an updated package repository for your OS, build from source, or want to run the bleeding-edge master version, you can follow the instructions in [INSTALL.md](https://github.com/gnome-terminator/terminator/blob/master/INSTALL.md)
+Besides the deb above, you can install from source per upstream INSTALL.md: `python3 setup.py install`.
 
+## License & upstream
 
-#### Quick Start:
+GPL v2 (same as upstream).
 
-Create more terminals by:  
- - horizontal split: `Ctrl-Shift-o`
- - vertical split: `Ctrl-Shift-e`
-
-Shift focus to:  
- - next terminal: `Ctrl-Shift-n`
- - previous terminal: `Ctrl-Shift-p`
-
-New tab: `Ctrl-Shift-t`
-
-New window: `Ctrl-Shift-i`
-
-Close terminal or tab:  
- - `Ctrl-Shift-w`
- - or right mouse click -> Close  
-
-Close window with all it's terminals and tabs: `Ctrl-Shift-q`
-
-Reset zoom: `Ctrl-0`
-
-Terminator Preferences menu:  
- - right mouse click -> Preferences  
-
-These and more modifiable shortcuts in:  
- - right mouse click -> Preferences -> Keybindings tab  
-
-Web Documentation: 
- - press `F1` or at https://gnome-terminator.readthedocs.io/en/latest/
-
-More info about shortcuts and cli config in man pages:  
- - `man terminator`
- - `man terminator_config`
-
-## Contributing
-
-Any help is welcome with the Terminator project.
-
-* [Open issues for bugs or enhancements](https://github.com/gnome-terminator/terminator/issues/new)
-* [Join our chat room on gitter.im for general questions](https://gitter.im/gnome-terminator/community)
-* [Help translating Terminator](TRANSLATION.md)
-
-You can find old bugs and questions in the launchpad project, but please don't post anything new there.
-
-* https://answers.launchpad.net/terminator
-* https://bugs.launchpad.net/terminator
-
-## Origins
-
-Terminator began by shamelessly copying code from the vte-demo.py in the vte 
-widget package, and the gedit terminal plugin (which was fantastically 
-useful at figuring out vte's API).
-
-vte-demo.py was not my code and is copyright its original author. While it 
-does not contain any specific licensing information in it, the VTE package 
-appears to be licenced under LGPL v2.
-
-The original version 0.1 release of Terminator was on Saturday, 28 July 2007.
- [Here is the archived Terminator 0.1 release announcement](http://cmsj.net/2007/07/28/terminator-01-released.html)
-
-## Licensing
-
-The gedit terminal plugin is part of the gedit-plugins package, which is 
-licenced under GPL v2 or later.
-
-I am thus licensing Terminator as GPL v2 only.
-
-Cristian Grada provided the old icon under the same licence.
-Cory Kontros provided the new icon under the CC-by-SA licence.
-For other authorship information, see debian/copyright
+- Upstream: https://github.com/gnome-terminator/terminator
+- This repository: https://github.com/hellonestor/Terminagent
