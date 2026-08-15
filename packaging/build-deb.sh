@@ -56,6 +56,10 @@ find "$package_root" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 install -d -m 0755 "$package_root/usr/share/doc/terminator"
 install -m 0644 "$source_dir/AGENT_CONTROL.md" \
     "$package_root/usr/share/doc/terminator/AGENT_CONTROL.md"
+install -m 0644 "$source_dir/REMOTINATOR_USAGE.md" \
+    "$package_root/usr/share/doc/terminator/REMOTINATOR_USAGE.md"
+install -m 0644 "$source_dir/AGENTS.md" \
+    "$package_root/usr/share/doc/terminator/AGENTS.md"
 install -m 0644 "$source_dir/COPYING" \
     "$package_root/usr/share/doc/terminator/copyright"
 
