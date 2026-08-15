@@ -52,7 +52,7 @@ PYEOF
         fi
     fi
 
-    # --- MiMoCode (jsonc, keep comments by pure text append) ---
+    # --- MiMoCode (jsonc, keep comments by pure text edit) ---
     mimo_jsonc="$home/.config/mimocode/mimocode.jsonc"
     if [ -f "$mimo_jsonc" ]; then
         if ! grep -q '"terminagent"' "$mimo_jsonc" 2>/dev/null; then
@@ -64,21 +64,41 @@ try:
         text = f.read()
 except OSError:
     sys.exit(0)
-# strip comments for parsing (naive: only /* */ and // outside strings)
 no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
 no_comments = re.sub(r'(?m)^\s*//.*$', '', no_comments)
 try:
     cfg = json.loads(no_comments)
 except ValueError:
     sys.exit(0)
-if isinstance(cfg, dict) and "terminagent" not in cfg.get("mcp", {}):
-    # insert mcp block before final closing brace
-    block = '\n  "mcp": {\n    "terminagent": {\n      "type": "local",\n      "command": ["%s"]\n    }\n  }\n' % cmd
+if not isinstance(cfg, dict) or "terminagent" in cfg.get("mcp", {}):
+    sys.exit(0)
+entry = '    "terminagent": {\n      "type": "local",\n      "command": ["%s"]\n    }' % cmd
+if "mcp" in cfg:
+    # insert into the existing mcp block: find its closing brace
+    m = re.search(r'"mcp"\s*:\s*\{', text)
+    if not m:
+        sys.exit(0)
+    i = text.find('{', m.start())
+    depth, end = 0, None
+    for j in range(i, len(text)):
+        if text[j] == '{':
+            depth += 1
+        elif text[j] == '}':
+            depth -= 1
+            if depth == 0:
+                end = j
+                break
+    if end is None:
+        sys.exit(0)
+    text = text[:end] + ",\n" + entry + "\n  " + text[end:]
+else:
+    # no mcp key yet: insert a new block before the final closing brace
+    block = '\n  "mcp": {\n' + entry + "\n  },\n"
     idx = text.rfind("}")
-    text = text[:idx] + block.rstrip("\n") + "\n" + text[idx:]
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    print("registered terminagent in", path)
+    text = text[:idx] + block + text[idx:]
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+print("registered terminagent in", path)
 PYEOF
         fi
     fi
