@@ -1,0 +1,39 @@
+name: Build deb
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches: [ agent-control-restored ]
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-setuptools python3-gi python3-gi-cairo \
+            python3-cairo python3-configobj python3-dbus python3-psutil \
+            gir1.2-glib-2.0 gir1.2-gtk-3.0 gir1.2-vte-2.91 gir1.2-keybinder-3.0 \
+            gir1.2-notify-0.7 gettext intltool libcairo-dev libgirepository1.0-dev \
+            libdbus-glib-1-dev dpkg-dev
+
+      - name: Build deb
+        run: packaging/build-deb.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminator-deb
+          path: dist/*.deb
+
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
